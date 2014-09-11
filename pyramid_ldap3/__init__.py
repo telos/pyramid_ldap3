@@ -178,8 +178,45 @@ class Connector(object):
 
         return result
 
-    def user_groups(self, userdn):
+    def user_groups(self, dn):
         """Get the groups the user belongs to.
+
+        Given a user DN, return a sequence of LDAP attribute dictionaries
+        matching the groups of which the DN is a member.  If the DN does not
+        exist, return ``None``.
+
+        In a return value ``[(dn, attrdict), ...]``, ``dn`` will be the
+        distinguished name of the group.  Attrdict will be a dictionary
+        mapping LDAP group attributes to sequences of values.
+
+        If :meth:`pyramid.config.Configurator.ldap_set_groups_query` was not
+        called, using this function will raise an
+        :exc:`pyramid.exceptions.ConfiguratorError`
+
+        """
+
+        # Want to change this to search from the user perspective.  Why search
+        # all groupd for a user when you can get his groups from the member of
+        # attribute.
+
+        conn = self.manager.connection()
+        search = getattr(self.registry, 'ldap_groups_query', None)
+        if search is None:
+            raise ConfigurationError(
+                'set_ldap_groups_query was not called during setup')
+        try:
+            results = search.execute(conn, dn=dn)
+        except ldap3.LDAPException:
+            logger.debug('Exception in user_groups with dn %r', dn,
+                exc_info=True)
+            return None
+
+        return results
+
+    def user_groups_recursive(self, dn, existing_results = []):
+        """Get the groups the user belongs to and recursively traverse through
+        them to find all other groups the user is a part of due to
+        nesting/inheritance.
 
         Given a user DN, return a sequence of LDAP attribute dictionaries
         matching the groups of which the DN is a member.  If the DN does not
@@ -200,13 +237,18 @@ class Connector(object):
             raise ConfigurationError(
                 'set_ldap_groups_query was not called during setup')
         try:
-            result = search.execute(conn, userdn=userdn)
+            results = search.execute(conn, dn=dn)
         except ldap3.LDAPException:
-            logger.debug('Exception in user_groups with userdn %r', userdn,
+            logger.debug('Exception in user_groups_recursive with dn %r', dn,
                 exc_info=True)
             return None
 
-        return result
+        for r in results:
+            if r not in existing_results:
+                existing_results.append(r)
+                existing_results = self.user_groups_recursive(r[0], existing_results)
+
+        return existing_results
 
 
 def ldap_set_login_query(config, base_dn, filter_tmpl,
@@ -256,7 +298,7 @@ def ldap_set_groups_query(config, base_dn, filter_tmpl,
 
     ``base_dn`` is the DN at which to begin the search.
     ``filter_tmpl`` is a string which can be used as an LDAP filter:
-    it should contain the replacement value ``%(userdn)s``.
+    it should contain the replacement value ``%(dn)s``.
     ``scope`` is any valid LDAP scope value
     (e.g. ``ldap3.SEARCH_SCOPE_SINGLE_LEVEL``).
     ``attributes`` is a list of attributes that shall be returned
@@ -268,7 +310,7 @@ def ldap_set_groups_query(config, base_dn, filter_tmpl,
 
         config.set_ldap_groups_query(
             base_dn='CN=Users,DC=example,DC=com',
-            filter_tmpl='(&(objectCategory=group)(member=%(userdn)s))'
+            filter_tmpl='(&(objectCategory=group)(member=%(dn)s))'
             scope=ldap3.SEARCH_SCOPE_WHOLE_SUBTREE)
 
     """
@@ -335,21 +377,21 @@ def get_ldap_connector(request):
     return connector
 
 
-def get_groups(userdn, request):
+def get_groups(dn, request):
     """Raw groupfinder function returning the complete group query result."""
     connector = get_ldap_connector(request)
-    return connector.user_groups(userdn)
+    return connector.user_groups(dn)
 
 
-def groupfinder(userdn, request):
+def groupfinder(dn, request):
     """Groupfinder function for Pyramid.
 
     A groupfinder implementation useful in conjunction with out-of-the-box
     Pyramid authentication policies.  It returns the DN of each group
-    belonging to the user specified by ``userdn`` to as a principal
+    belonging to the user specified by ``dn`` to as a principal
     in the list of results; if the user does not exist, it returns None.
     """
-    groups = get_groups(userdn, request)
+    groups = get_groups(dn, request)
     if groups:
         groups = [r[0] for r in groups]
     return groups
